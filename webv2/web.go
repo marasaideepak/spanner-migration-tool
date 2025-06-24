@@ -35,6 +35,7 @@ import (
 	instance "cloud.google.com/go/spanner/admin/instance/apiv1"
 	storageclient "github.com/GoogleCloudPlatform/spanner-migration-tool/accessors/clients/storage"
 	storageaccessor "github.com/GoogleCloudPlatform/spanner-migration-tool/accessors/storage"
+	"github.com/GoogleCloudPlatform/spanner-migration-tool/accessors/cassandra"
 	"github.com/GoogleCloudPlatform/spanner-migration-tool/cmd"
 	"github.com/GoogleCloudPlatform/spanner-migration-tool/common/constants"
 	"github.com/GoogleCloudPlatform/spanner-migration-tool/common/utils"
@@ -97,6 +98,47 @@ func databaseConnection(w http.ResponseWriter, r *http.Request) {
 	case constants.ORACLE:
 		portNumber, _ := strconv.Atoi(config.Port)
 		dataSourceName = go_ora.BuildUrl(config.Host, portNumber, config.Database, config.User, config.Password, nil)
+	case constants.CASSANDRA:
+		// Cassandra does not use sql.Open. We use the accessor to validate the connection.
+		sourceProfile := profiles.SourceProfile{
+			Driver: constants.CASSANDRA,
+			Conn: profiles.SourceProfileConnection{
+				Ty: profiles.SourceProfileConnectionTypeCassandra,
+				Cassandra: profiles.SourceProfileConnectionCassandra{
+					Host:       config.Host,
+					Port:       config.Port,
+					Keyspace:   config.Database, 
+					DataCenter: config.DataCenter,
+					User:       config.User,
+					Pwd:        config.Password,
+				},
+			},
+		}
+
+		accessor, KeyspaceMetadata, err := cassandraaccessor.NewCassandraAccessor(sourceProfile)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Cassandra connection error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		accessor.Close()
+
+		sessionState := session.GetSessionState()
+		sessionState.SourceDB = nil 
+		sessionState.DbName = config.Database 
+		sessionState.Driver = config.Driver
+		sessionState.KeyspaceMetadata = KeyspaceMetadata
+		sessionState.SessionFile = ""
+		sessionState.Dialect = config.Dialect
+		sessionState.SourceDBConnDetails = session.SourceDBConnDetails{
+			Host:           config.Host,
+			Port:           config.Port,
+			User:           config.User,
+			Password:       config.Password,
+			DataCenter:     config.DataCenter, 
+			ConnectionType: helpers.DIRECT_CONNECT_MODE,
+		}
+		w.WriteHeader(http.StatusOK)
+		return
 	default:
 		http.Error(w, fmt.Sprintf("Driver : '%s' is not supported", config.Driver), http.StatusBadRequest)
 		return
@@ -345,6 +387,41 @@ func setSourceDBDetailsForDirectConnect(w http.ResponseWriter, r *http.Request) 
 	case constants.ORACLE:
 		portNumber, _ := strconv.Atoi(config.Port)
 		dataSourceName = go_ora.BuildUrl(config.Host, portNumber, config.Database, config.User, config.Password, nil)
+	case constants.CASSANDRA:
+		sourceProfile := profiles.SourceProfile{
+			Driver: constants.CASSANDRA,
+			Conn: profiles.SourceProfileConnection{
+				Ty: profiles.SourceProfileConnectionTypeCassandra,
+				Cassandra: profiles.SourceProfileConnectionCassandra{
+					Host:       config.Host,
+					Port:       config.Port,
+					Keyspace:   config.Database,
+					DataCenter: config.DataCenter,
+					User:       config.User,
+					Pwd:        config.Password,
+				},
+			},
+		}
+		accessor, KeyspaceMetadata, err := cassandraaccessor.NewCassandraAccessor(sourceProfile)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Cassandra connection error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		accessor.Close()
+
+		sessionState.DbName = config.Database
+		sessionState.KeyspaceMetadata = KeyspaceMetadata
+		sessionState.SessionFile = ""
+		sessionState.SourceDBConnDetails = session.SourceDBConnDetails{
+			Host:           config.Host,
+			Port:           config.Port,
+			User:           config.User,
+			Password:       config.Password,
+			DataCenter:     config.DataCenter,
+			ConnectionType: helpers.DIRECT_CONNECT_MODE,
+		}
+		w.WriteHeader(http.StatusOK)
+		return
 	default:
 		http.Error(w, fmt.Sprintf("Driver : '%s' is not supported", config.Driver), http.StatusBadRequest)
 		return
@@ -758,6 +835,14 @@ func getSourceAndTargetProfiles(sessionState *session.SessionState, details type
 		if err != nil {
 			return profiles.SourceProfile{}, profiles.TargetProfile{}, utils.IOStreams{}, "", fmt.Errorf("error while creating config to initiate sharded migration:%v", err)
 		}
+	} else if sessionState.Driver == constants.CASSANDRA {
+		sourceProfileString = fmt.Sprintf("host=%v,port=%v,user=%v,password=%v,keyspace=%v,datacenter=%v",
+			sourceDBConnectionDetails.Host,
+			sourceDBConnectionDetails.Port,
+			sourceDBConnectionDetails.User,
+			sourceDBConnectionDetails.Password,
+			sessionState.DbName, 
+			sourceDBConnectionDetails.DataCenter) 
 	} else {
 		sourceProfileString = fmt.Sprintf("host=%v,port=%v,user=%v,password=%v,dbName=%v",
 			sourceDBConnectionDetails.Host, sourceDBConnectionDetails.Port, sourceDBConnectionDetails.User,
